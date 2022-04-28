@@ -1,0 +1,984 @@
+---
+title: "Analysis endemic squamates abundance"
+author: "Julien Christophe Piquet"
+date: "14 de mayo de 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = F)
+```
+
+# **Endemic lizards**
+
+## **SECR**
+
+```{r SECR analysis}
+library(secr)
+setwd("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis")
+```
+
+### **Covariates analysis**
+
+Prior to the calculation of lizard density, we assessed which covariates could affect our estimates. Considering the duration of capture sessions, we took a supplementary measure of weather covariates at the end of the session, thus we calculate the average of both measures to use it the analysis. Considering the significant number of capture sessions with no captures in invaded sites, we repeated the analyses for control sites alone to prevent misleading results affecting our subsequent density estimation.
+
+```{r covariate analysis secr}
+library(readxl)
+library(lme4)
+library(DHARMa)
+library(MuMIn)
+data <- read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/data_captures_lizards2018.xlsx", sheet = "density_data")
+data$smpl_site<-as.factor(data$smpl_site)
+# Calculation of weather variables means
+temp<-cbind(data$temp_1,data$temp_2)
+data$temp<-rowMeans(temp)
+rh<-cbind(data$rh_1,data$rh_2)
+data$rh<-rowMeans(rh)
+max_wind<-cbind(data$max_wind_1,data$max_wind_2)
+data$max_wind<-rowMeans(max_wind)
+avg_wind<-cbind(data$avg_wind_1,data$avg_wind_2)
+data$avg_wind<-rowMeans(avg_wind)
+remove(avg_wind,max_wind,rh,temp)
+rm(list=setdiff(ls(),"data"))
+# Generating Negative binomial GLMM to detect the most important variables
+model<-glmer.nb(n_lizards~scale(julian_date)+scale(smpl_time1_decimal)+scale(temp)+scale(rh)+scale(max_wind)+scale(avg_wind)+(1|smpl_site),data=data)
+summary(model)
+testResiduals(simulateResiduals(model,n=1000))
+testZeroInflation(simulateResiduals(model,n=1000))
+# Repeating the analysis for control sites alone
+data_control<-data[data$snakes==2,]
+model_control<-glmer.nb(n_lizards~scale(julian_date)+scale(smpl_time1_decimal)+scale(temp)+scale(rh)+scale(avg_wind)+scale(max_wind)+(1|smpl_site),data=data_control)
+testResiduals(simulateResiduals(model_control,n=1000))
+testZeroInflation(simulateResiduals(model_control,n=1000))
+summary(model_control)
+# Extracting results
+model_results<-summary(model)
+model_results<-model_results$coefficients
+estimate<-model_results[,1]
+se<-model_results[,2]
+p<-model_results[,4]
+model_results<-c(estimate,se,p)
+model_results<-cbind(model_results,c(rep("estimate",7),rep("se",7),rep("p",7)),rep(seq(1,7,1),3))
+colnames(model_results)<-c("results","type","number")
+model_results<-as.data.frame(model_results)
+model_results<-model_results[order(model_results$number),]
+model_results<-as.matrix(model_results)
+model_results
+write.csv(model_results,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/abiotic_variables_influence_secr.csv"),quote=F)
+rm(list=ls())
+```
+
+### **SECR analysis**
+
+We build a single capthist data for all sites and sessiones. Prior to the estimation of lizard density on each site, we calculate the Root Pooled Spatial Variance over all sites to build the site-session masks. 
+
+```{r creation of secr data and calculation of RPSV}
+# Building a single capthist data over all sites and sessions
+library(secr)
+library(readxl)
+file.remove("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/trapfiles/") # deleting previous files
+captfile<-read_xlsx("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/capthist_data.xlsx") # reading capture data
+captfile<-captfile[,-c(1,6,7)]
+write.table(captfile,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/capthist_data.txt"),sep="\t",quote=F,row.names = F) 
+trapfile<-read_xlsx("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/trapfile.xlsx") # reading trap data
+trapfile<-trapfile[,-c(5,6,8)]
+trapfile_list<-split(trapfile,trapfile$session_site)
+trapfile_list<-lapply(trapfile_list,"[",-5)
+mapply(function(x,y) write.table(x,file=paste("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/trapfiles/",y,".txt",sep=""),row.names = F,quote=F,sep="\t"),x=trapfile_list,y=levels(as.factor(trapfile$session_site)))
+secr_data<-read.capthist(captfile="C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/capthist_data.txt",trapfile=list.files("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/trapfiles",pattern=".txt",full.names = T),detector="multi",fmt=c("trapID"),noncapt="NONE",noccasions = 2,verify=F,skip=1,binary.usage=F) # creating capthist data
+# Calculating RPSV and buffer width
+rpsv<-RPSV(secr_data)
+rpsv<-as.matrix(cbind(unlist(rpsv)))
+rpsv<-rpsv[is.finite(rpsv),]
+width<-max(rpsv,na.rm = T)*10
+remove(trapfile,trapfile_list,captfile)
+```
+
+We create the timecov data.
+
+```{r building timecov data}
+library(readxl)
+timecov<-read_xlsx("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/timecov.xlsx")
+timecov<-timecov[order(timecov$session_site),]
+timecov<-timecov[,c(2,4)]
+timecov$session_site<-as.factor(timecov$session_site)
+colnames(timecov)<-c("session_site","time")
+timecov_list<-split(timecov,timecov$session_site)
+timecov<-timecov_list
+remove(timecov_list)
+```
+
+We now use the secr.fit function to estimate the most appropriate detection function. We use a pooled secr object to determine the starting values, and examine whether the buffer width is good enough. We subsequently re-run the model maximizing the conditional likelihood, using the half-normal, negative exponential and hazard rate detection functions.
+
+```{r secr detection funtion}
+# Calculating starting values
+start<-secr.fit(secr_data,start=list(g0=0.1,sigma=max(rpsv,na.rm = T)),buffer=width,verify=F,detectfn = 0,biasLimit=0.01,method="Nelder-Mead",CL=T,trace=F)
+## Checking buffer width
+buffer_width<-esa.plot(start,max.buffer = width*2,detectfn = 0,noccasions = 2,session = c(names(secr_data))) # fitting density against buffer width
+buffer_width<-lapply(buffer_width,function(x) x$buffer[which.min(x$density)]) # finding for each site-session combination the buffer width were density stabilizes
+max_width<-max(unlist(buffer_width)) # maximum value of buffer width over all site-session combinations for which density stabilizes
+remove(buffer_width,pooled_secr)
+
+memory.limit(80000)
+
+# Halfnormal model
+
+secr.halfnormal<-secr.fit(secr_data,buffer=max_width,detectfn = 0,verify=F,timecov=timecov,start=start,method="Nelder-Mead",trace=F,CL=T)
+
+# Negative exponential model
+
+secr.negexp<-secr.fit(secr_data,buffer=max_width,detectfn = 2,verify=F,timecov=timecov,start=start,method="Nelder-Mead",trace=F,CL=T)
+
+# Hazard rate model
+
+secr.hazrat<-secr.fit(secr_data,buffer=max_width,detectfn = 1,verify=F,timecov=timecov,start=start,method="Nelder-Mead",trace=F,CL=T)
+
+list_models<-list(secr.halfnormal,secr.negexp,secr.hazrat)
+
+AIC_table_detecfn<-lapply(list_models,function(x) AIC(x))
+AIC<-sapply(AIC_table_detecfn,"[[","AIC")
+AICc<-sapply(AIC_table_detecfn,"[[","AICc")
+model<-sapply(AIC_table_detecfn,"[[","model")
+detection_function<-sapply(AIC_table_detecfn,"[[","detectfn")
+AIC_table_detecfn<-cbind(model,detection_function,AIC,AICc)
+write.csv(AIC_table_detecfn,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/AIC_table_detecfn.csv"))
+
+AIC_table_detecfn
+
+rm(list=setdiff(ls(),c("max_width","secr.negexp","start","secr_data","timecov","width")))
+```
+
+Based on the previous examination, negative exponential detection function is the most appropriate for our data. Therefore, we run the following analysis using such function. We now examine if the model improves by including the time of sampling.
+
+```{r secr factors}
+
+secr.negexp.time<-secr.fit(secr_data,model=list(g0~time),buffer=max_width,detectfn = 2,verify=F,timecov=timecov,start=start,method="Nelder-Mead",trace=F,CL=T)
+
+secr.negexp.learn<-secr.fit(secr_data,model=list(g0~b),buffer=max_width,detectfn = 2,verify=F,timecov=timecov,start=start,method="Nelder-Mead",trace=F,CL=T)
+
+secr.negexp.timelearn<-secr.fit(secr_data,model=list(g0~time+b),buffer=max_width,detectfn = 2,verify=F,timecov=timecov,start=start,method="Nelder-Mead",trace=F,CL=T)
+
+# AIC calculation 
+
+aic_table_factors<-list(secr.negexp,secr.negexp.time,secr.negexp.learn,secr.negexp.timelearn)
+
+aic_table_factors<-lapply(aic_table_factors,function(x) AIC(x))
+AIC<-sapply(aic_table_factors,"[[","AIC")
+AICc<-sapply(aic_table_factors,"[[","AICc")
+models<-sapply(aic_table_factors,"[[","model")
+aic_table_factors<-cbind(models,AIC,AICc)
+write.csv(aic_table_factors,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/aic_table_factors.csv"))
+
+aic_table_factors
+
+save.image("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/secr.RData") # saving environment with all models
+
+rm(list=setdiff(ls(),c("secr_data","start","max_width","timecov","secr.negexp.time")))
+```
+
+Based on this evaluation, the best model is the negative exponential model with g0 fitted as a function of sampling time.
+
+```{r density calculation}
+final_model<-secr.negexp.time
+
+#Estimating density
+density<-derived(final_model,se.esa=F,se.D=T)
+
+# Retrieving density
+density_estimates<-lapply(density,"[[","estimate")
+density_estimates<-lapply(density_estimates,"[",2)
+
+# Retrieving SE 
+se_density<-lapply(density,"[[","SE.estimate")
+se_density<-lapply(se_density,"[",2)
+
+# Retrieving 95% Confidence interval
+lowerCI<-lapply(density,"[[","lcl")
+lowerCI<-lapply(lowerCI,"[",2)
+upperCI<-lapply(density,"[[","ucl")
+upperCI<-lapply(upperCI,"[",2)
+
+# Retrieving CVD
+cvd<-lapply(density,"[[","CVD")
+cvd<-lapply(cvd,"[",2)
+
+# Creating dataframe
+density_data<-cbind(as.matrix(unlist(density_estimates)),as.matrix(unlist(se_density)),as.matrix(unlist(lowerCI)),as.matrix(unlist(upperCI)), as.matrix(unlist(cvd)))
+colnames(density_data)<-c("density","se_density","lowerCI_density","upperCI_density","cvd")
+
+# Including the sampling site,session information
+session<-substr(rownames(density_data),1,1)
+sampl_site<-substr(rownames(density_data),2,3)
+density_data<-cbind(density_data,session,sampl_site)
+
+# Re-ordering data frame and putting CVD in percentage scale
+density_data<-density_data[,c(6,7,1,2,3,4,5)]
+density_data<-apply(density_data,2,as.numeric)
+density_data<-as.data.frame(density_data)
+density_data$cvd<-density_data$cvd*100
+
+write.csv(density_data,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/density_data.csv"))
+# We now work on the density_data dataframe to include the area and snakes factors
+
+save.image("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/secr.density.RData") # saving progress
+
+rm(list=setdiff(ls(),c("density_data")))
+```
+
+We use the previously created density_data dataframe to analyze the impact of snakes on lizard density.
+
+```{r snake impact}
+library(readxl)
+library(glmmTMB)
+library(effsize)
+library(DHARMa)
+library(car)
+density_data<-read.csv("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/density_data.csv",header=T,sep=";")[,2:5] # uploading data
+
+# Including area and snake factors
+area<-substr(density_data$sampl_site,1,1)
+area<-as.numeric(area)
+area<-replace(area,area<3,1)
+area<-replace(area,1<area & area<5,2)
+area<-replace(area,area>4,3)
+density_data<-cbind(area,density_data)
+snakes<-ifelse(as.integer(substr(density_data$sampl_site,1,1))%%2==0,2,1)
+density_data<-cbind(density_data,snakes)
+
+# Coding factors 
+factors<-list(density_data$sampl_site,density_data$session,density_data$area,density_data$snakes)
+factors<-sapply(factors,as.factor)
+colnames(factors)<-c("sampl_site","visit","area","snakes")
+density_data<-density_data[,-c(1,2,3,6)]
+density_data<-cbind(density_data,factors)
+density_data<-density_data[,c(5,6,3,4,1,2)]
+
+# Average CVD
+mean(density_data$cvd,na.rm=T)
+
+# Density analysis
+with(density_data,hist(density))
+## Zero-inflated Mixed model
+zip1<-glmmTMB(density~snakes+(1|area)+(1|visit)+(1|sampl_site),family=gaussian,data=density_data,ziformula = ~snakes,dispformula = ~area+visit)
+plot(simulateResiduals(zip1,1000)) # checking model residuals
+testResiduals(simulateResiduals(zip1,1000)) # checking residual uniformity and dispersion
+summary(zip1)
+car::Anova(zip1,component = "cond")
+car::Anova(zip1,component="zi")
+
+
+# Effect size
+## Overall data
+average_density_persite<-tapply(density_data$density,density_data[,3],mean)
+snakes<-ifelse(as.integer(substr(rownames(average_density_persite),1,1))%%2==0,2,1)
+area<-ifelse(as.integer(substr(rownames(average_density_persite),1,1))<3,1,  ifelse(as.integer(substr(rownames(average_density_persite),1,1))> 2 & as.integer(substr(rownames(average_density_persite),1,1)) < 5,2,3))
+averaged_data<-as.data.frame(cbind(average_density_persite,snakes,area))
+effsize_secr<-cohen.d(average_density_persite~snakes,data=averaged_data,pooled=F,hedges.correction=F)
+effsize_secr
+
+# Calculating means
+## Overall data
+tapply(density_data$density,density_data$snakes,mean)
+tapply(density_data$density,density_data$snakes,sd)
+## Per area
+area_data<-split(density_data,density_data$area)
+mean_area<-lapply(area_data,function(x) aggregate(x$density,list(x$snakes),mean))
+sd_area<-lapply(area_data,function(x) aggregate(x$density,list(x$snakes),sd))
+mean_area<-lapply(mean_area,"[[","x")
+mean_area<-as.matrix(unlist(mean_area))
+sd_area<-lapply(sd_area,"[[","x")
+sd_area<-as.matrix(unlist(sd_area))
+area_data<-cbind(c(1,1,2,2,3,3),c(1,2,1,2,1,2),mean_area,sd_area)
+colnames(area_data)<-c("area","snakes","mean","sd")
+area_data
+
+write.csv(area_data,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/area_data.csv"))
+
+save.image("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/secr/model.density.RData") # saving progress
+
+rm(list=ls())
+```
+
+
+## **Distance sampling**
+
+```{r unmarked}
+library(unmarked)
+```
+
+Following recommendations made by Thomas et al. (2010), we truncate around 5% (8 m).
+
+```{r distance sampling truncation}
+library(readxl)
+data <- read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/data.xlsx", sheet = "obs")
+data_may<-data[data$visit==1,]
+data_june<-data[data$visit==2,]
+data_july<-data[data$visit==3,]
+data_aug<-data[data$visit==4,]
+data_sept<-data[data$visit==5,]
+breaks <- seq(0,20,by=1)
+frequency_may<-cut(data_may$dist,breaks,right=FALSE)
+frequency_may<-table(frequency_may)
+relative_freq_may<-frequency_may/sum(frequency_may)
+cummulative_freq_may<-cumsum(relative_freq_may)
+truncation_matrix_may<-as.matrix(cbind(frequency_may,relative_freq_may,cummulative_freq_may))
+frequency_june<-cut(data_june$dist,breaks,right=FALSE)
+frequency_june<-table(frequency_june)
+relative_freq_june<-frequency_june/sum(frequency_june)
+cummulative_freq_june<-cumsum(relative_freq_june)
+truncation_matrix_june<-as.matrix(cbind(frequency_june,relative_freq_june,cummulative_freq_june))
+frequency_july<-cut(data_july$dist,breaks,right=FALSE)
+frequency_july<-table(frequency_july)
+relative_freq_july<-frequency_july/sum(frequency_july)
+cummulative_freq_july<-cumsum(relative_freq_july)
+truncation_matrix_july<-as.matrix(cbind(frequency_july,relative_freq_july,cummulative_freq_july))
+frequency_aug<-cut(data_aug$dist,breaks,right=FALSE)
+frequency_aug<-table(frequency_aug)
+relative_freq_aug<-frequency_aug/sum(frequency_aug)
+cummulative_freq_aug<-cumsum(relative_freq_aug)
+truncation_matrix_aug<-as.matrix(cbind(frequency_aug,relative_freq_aug,cummulative_freq_aug))
+frequency_sept<-cut(data_sept$dist,breaks,right=FALSE)
+frequency_sept<-table(frequency_sept)
+relative_freq_sept<-frequency_sept/sum(frequency_sept)
+cummulative_freq_sept<-cumsum(relative_freq_sept)
+truncation_matrix_sept<-as.matrix(cbind(frequency_sept,relative_freq_sept,cummulative_freq_sept))
+truncation_matrix<-cbind(truncation_matrix_may[,3],truncation_matrix_june[,3],truncation_matrix_july[,3],truncation_matrix_aug[,3],truncation_matrix_sept[,3])
+average<-apply(truncation_matrix,1,mean)
+truncation_matrix<-cbind(truncation_matrix,average)
+truncation_matrix<-as.data.frame(truncation_matrix)
+rownames(truncation_matrix[length(which(truncation_matrix[,6]<0.95)),])
+truncation_matrix<-as.matrix(truncation_matrix)
+write.csv(truncation_matrix,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/truncation_matrix.csv"))
+
+rm(list=ls())
+```
+
+### **Covariate analysis distance sampling**
+
+We transformed the number of lizards detected using a Yeo-Johnson transformation to ensure the dependent variable is continuous and meet linearity assumption.
+
+```{r covariate analysis distance sampling}
+library(readxl)
+library(lme4)
+library(DHARMa)
+library(MuMIn)
+data <- read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/data.xlsx", sheet = "trans")
+data$transect<-as.factor(data$transect)
+# Generating Negative binomial GLMM to detect the most important variables
+model<-glmer.nb(n_lizards_obs~scale(julian_date)+scale(time1_decimal)+scale(temp)+scale(rh)+scale(max_wind)+scale(avg_wind)+(1|transect),data=data)
+testResiduals(simulateResiduals(model,n=1000))
+testZeroInflation(simulateResiduals(model,n=1000))
+summary(model)
+# Extracting results
+model_results<-summary(model)
+model_results<-model_results$coefficients
+estimate<-model_results[,1]
+se<-model_results[,2]
+p<-model_results[,4]
+model_results<-c(estimate,se,p)
+model_results<-cbind(model_results,c(rep("estimate",7),rep("se",7),rep("p",7)),rep(seq(1,7,1),3))
+colnames(model_results)<-c("results","type","number")
+model_results<-as.data.frame(model_results)
+model_results<-model_results[order(model_results$number),]
+model_results<-as.matrix(model_results)
+model_results
+write.csv(model_results,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/abiotic_variables_influence_distance_sampling.csv"))
+rm(list=ls())
+```
+
+### **Data formation**
+
+We transform our initial data to the format required by *unmarked*.
+
+```{r data formation distance sampling}
+library(readxl)
+library(unmarked)
+## Observation data, including all observations in each distance bin over each transect and visit
+ydat <- read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/ydat.xlsx",col_names=T)
+ydat<-apply(ydat,2,as.numeric)
+ydat<-as.data.frame(ydat)
+rownames(ydat)<-ydat[,1]
+ydat<-ydat[,-1]
+ydat_may<-ydat[,c(1:16)]
+ydat_may<-ydat_may[complete.cases(ydat_may),]
+ydat_june<-ydat[,17:32]
+ydat_june<-ydat_june[complete.cases(ydat_june),]
+ydat_july<-ydat[,33:48]
+ydat_july<-ydat_july[complete.cases(ydat_july),]
+ydat_aug<-ydat[,49:64]
+ydat_aug<-ydat_aug[complete.cases(ydat_aug),]
+ydat_sept<-ydat[,65:80]
+ydat_sept<-ydat_sept[complete.cases(ydat_sept),]
+# Transect length, calculated as the average of each transect per month
+tlength_may<-as.data.frame(read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/data.xlsx",sheet = "tlength"))[,2:3]
+tlength_june<-as.data.frame(read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/data.xlsx",sheet = "tlength"))[,4:5]
+tlength_july<-as.data.frame(read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/data.xlsx",sheet = "tlength"))[,6:7]
+tlength_aug<-as.data.frame(read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/data.xlsx",sheet = "tlength"))[,8:9]
+tlength_sept<-as.data.frame(read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/data.xlsx",sheet = "tlength"))[,10:11]
+tlength_may<-tlength_may[complete.cases(tlength_may),]
+tlength_may<-apply(tlength_may,1,mean)
+tlength_june<-tlength_june[complete.cases(tlength_june),]
+tlength_june<-apply(tlength_june,1,mean)
+tlength_july<-tlength_july[complete.cases(tlength_july),]
+tlength_july<-apply(tlength_july,1,mean)
+tlength_aug<-tlength_aug[complete.cases(tlength_aug),]
+tlength_aug<-apply(tlength_aug,1,mean)
+tlength_sept<-tlength_sept[complete.cases(tlength_sept),]
+tlength_sept<-apply(tlength_sept,1,mean)
+# Site-visit covariates: temperature and time_decimal
+temp<-as.data.frame(read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/data.xlsx",sheet = "temp"))
+temp<-as.data.frame(temp)
+rownames(temp)<-temp[,1]
+temp<-temp[,-1]
+temp_may<-temp[,1:2]
+temp_may<-temp_may[complete.cases(temp_may),]
+temp_june<-temp[,3:4]
+temp_june<-temp_june[complete.cases(temp_june),]
+temp_july<-temp[,5:6]
+temp_july<-temp_july[complete.cases(temp_july),]
+temp_aug<-temp[,7:8]
+temp_aug<-temp_aug[complete.cases(temp_aug),]
+temp_sept<-temp[,9:10]
+temp_sept<-temp_sept[complete.cases(temp_sept),]
+temp_may<-scale(temp_may)
+temp_june<-scale(temp_june)
+temp_july<-scale(temp_july)
+temp_aug<-scale(temp_aug)
+temp_sept<-scale(temp_sept)
+time_decimal<-as.data.frame(read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/data.xlsx",sheet = "time_decimal"))
+time_decimal<-as.data.frame(time_decimal)
+rownames(time_decimal)<-time_decimal[,1]
+time_decimal<-time_decimal[,-1]
+time_decimal_may<-time_decimal[,1:2]
+time_decimal_may<-time_decimal_may[complete.cases(time_decimal_may),]
+time_decimal_june<-time_decimal[,3:4]
+time_decimal_june<-time_decimal_june[complete.cases(time_decimal_june),]
+time_decimal_july<-time_decimal[,5:6]
+time_decimal_july<-time_decimal_july[complete.cases(time_decimal_july),]
+time_decimal_aug<-time_decimal[,7:8]
+time_decimal_aug<-time_decimal_aug[complete.cases(time_decimal_aug),]
+time_decimal_sept<-time_decimal[,9:10]
+time_decimal_sept<-time_decimal_sept[complete.cases(time_decimal_sept),]
+time_decimal_may<-scale(time_decimal_may)
+time_decimal_june<-scale(time_decimal_june)
+time_decimal_july<-scale(time_decimal_july)
+time_decimal_aug<-scale(time_decimal_aug)
+time_decimal_sept<-scale(time_decimal_sept)
+# Site covariates
+sitecovs<-as.data.frame(read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/data.xlsx",sheet="sitecovs"))
+sitecovs$area<-as.factor(sitecovs$area)
+sitecovs$snakes<-as.factor(sitecovs$snakes)
+sitecovs$trans<-as.factor(sitecovs$trans)
+sitecovs<-as.data.frame(sitecovs)
+rownames(sitecovs)<-sitecovs[,1]
+sitecovs_may<-sitecovs[sitecovs$may==1,]
+sitecovs_june<-sitecovs[sitecovs$june==1,]
+sitecovs_july<-sitecovs[sitecovs$july==1,]
+sitecovs_aug<-sitecovs[sitecovs$august==1,]
+sitecovs_sept<-sitecovs[sitecovs$september==1,]
+# Formatting data
+umf_may<-unmarkedFrameGDS(y=ydat_may,siteCovs=sitecovs_may,numPrimary = 2,survey = "line",dist.breaks = seq(0,8,by=1),unitsIn = "m",tlength =as.vector(tlength_may),yearlySiteCovs = list(time=time_decimal_may,temp=temp_may))
+umf_june<-unmarkedFrameGDS(y=ydat_june,siteCovs=sitecovs_june,numPrimary = 2,survey = "line",dist.breaks = seq(0,8,by=1),unitsIn = "m",tlength =as.vector(tlength_june),yearlySiteCovs = list(time=time_decimal_june,temp=temp_june))
+umf_july<-unmarkedFrameGDS(y=ydat_july,siteCovs=sitecovs_july,numPrimary = 2,survey = "line",dist.breaks = seq(0,8,by=1),unitsIn = "m",tlength =as.vector(tlength_july),yearlySiteCovs = list(time=time_decimal_july,temp=temp_july))
+umf_aug<-unmarkedFrameGDS(y=ydat_aug,siteCovs=sitecovs_aug,numPrimary = 2,survey = "line",dist.breaks = seq(0,8,by=1),unitsIn = "m",tlength =as.vector(tlength_aug),yearlySiteCovs = list(time=time_decimal_aug,temp=temp_aug))
+umf_sept<-unmarkedFrameGDS(y=ydat_sept,siteCovs=sitecovs_sept,numPrimary = 2,survey = "line",dist.breaks = seq(0,8,by=1),unitsIn = "m",tlength =as.vector(tlength_sept),yearlySiteCovs = list(time=time_decimal_sept,temp=temp_sept))
+rm(list=setdiff(ls(),c("umf_may","umf_june","umf_july","umf_aug","umf_sept")))
+```
+
+### **Modelling lizard density**
+
+#### **Model definition: detection function**
+
+```{r model selection distance sampling}
+# May
+## Null model
+### Poisson
+null.p.model<-gdistsamp(~1,~1,~1, umf_may,keyfun = "uniform",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+halfnorm.p.model<-gdistsamp(~1,~1,~1,umf_may,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+hazard.p.model<-gdistsamp(~1,~1,~1,umf_may,keyfun = "hazard",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+## Negative binomial
+null.nb.model<-gdistsamp(~1,~1,~1,umf_may,keyfun = "uniform",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+halfnorm.nb.model<-gdistsamp(~1,~1,~1,umf_may,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+hazard.nb.model<-gdistsamp(~1,~1,~1,umf_may,keyfun = "hazard",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+selection_may<-fitList(null.p.model=null.p.model,halfnorm.p.model=halfnorm.p.model,hazard.p.model=hazard.p.model,null.nb.model=null.nb.model,halfnorm.nb.model=halfnorm.nb.model,hazard.nb.model=hazard.nb.model)
+selection_may<-modSel(selection_may)
+#June
+## Null model
+### Poisson
+null.p.model<-gdistsamp(~1,~1,~1, umf_june,keyfun = "uniform",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+halfnorm.p.model<-gdistsamp(~1,~1,~1,umf_june,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+hazard.p.model<-gdistsamp(~1,~1,~1,umf_june,keyfun = "hazard",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+## Negative binomial
+null.nb.model<-gdistsamp(~1,~1,~1,umf_june,keyfun = "uniform",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+halfnorm.nb.model<-gdistsamp(~1,~1,~1,umf_june,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+hazard.nb.model<-gdistsamp(~1,~1,~1,umf_june,keyfun = "hazard",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+selection_june<-fitList(null.p.model=null.p.model,halfnorm.p.model=halfnorm.p.model,hazard.p.model=hazard.p.model,null.nb.model=null.nb.model,halfnorm.nb.model=halfnorm.nb.model,hazard.nb.model=hazard.nb.model)
+selection_june<-modSel(selection_june)
+# July
+## Null model
+### Poisson
+null.p.model<-gdistsamp(~1,~1,~1, umf_july,keyfun = "uniform",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+halfnorm.p.model<-gdistsamp(~1,~1,~1,umf_july,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+hazard.p.model<-gdistsamp(~1,~1,~1,umf_july,keyfun = "hazard",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+## Negative binomial
+null.nb.model<-gdistsamp(~1,~1,~1,umf_july,keyfun = "uniform",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+halfnorm.nb.model<-gdistsamp(~1,~1,~1,umf_july,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+hazard.nb.model<-gdistsamp(~1,~1,~1,umf_july,keyfun = "hazard",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+selection_july<-fitList(null.p.model=null.p.model,halfnorm.p.model=halfnorm.p.model,hazard.p.model=hazard.p.model,null.nb.model=null.nb.model,halfnorm.nb.model=halfnorm.nb.model,hazard.nb.model=hazard.nb.model)
+selection_july<-modSel(selection_july)
+# August
+## Null model
+### Poisson
+null.p.model<-gdistsamp(~1,~1,~1, umf_aug,keyfun = "uniform",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+halfnorm.p.model<-gdistsamp(~1,~1,~1,umf_aug,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+hazard.p.model<-gdistsamp(~1,~1,~1,umf_aug,keyfun = "hazard",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+## Negative binomial
+null.nb.model<-gdistsamp(~1,~1,~1,umf_aug,keyfun = "uniform",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+halfnorm.nb.model<-gdistsamp(~1,~1,~1,umf_aug,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+hazard.nb.model<-gdistsamp(~1,~1,~1,umf_aug,keyfun = "hazard",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+selection_aug<-fitList(null.p.model=null.p.model,halfnorm.p.model=halfnorm.p.model,hazard.p.model=hazard.p.model,null.nb.model=null.nb.model,halfnorm.nb.model=halfnorm.nb.model,hazard.nb.model=hazard.nb.model)
+selection_aug<-modSel(selection_aug)
+# September
+## Null model
+### Poisson
+null.p.model<-gdistsamp(~1,~1,~1, umf_sept,keyfun = "uniform",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+halfnorm.p.model<-gdistsamp(~1,~1,~1,umf_sept,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+hazard.p.model<-gdistsamp(~1,~1,~1,umf_sept,keyfun = "hazard",output="density",unitsOut = "ha",mixture = "P",method="BFGS")
+## Negative binomial
+null.nb.model<-gdistsamp(~1,~1,~1,umf_sept,keyfun = "uniform",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+halfnorm.nb.model<-gdistsamp(~1,~1,~1,umf_sept,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+hazard.nb.model<-gdistsamp(~1,~1,~1,umf_sept,keyfun = "hazard",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+selection_sept<-fitList(null.p.model=null.p.model,halfnorm.p.model=halfnorm.p.model,hazard.p.model=hazard.p.model,null.nb.model=null.nb.model,halfnorm.nb.model=halfnorm.nb.model,hazard.nb.model=hazard.nb.model)
+selection_sept<-modSel(selection_sept)
+```
+
+```{r model selection for the detection function}
+library(dplyr)
+list_selections<-list(selection_may@Full,selection_june@Full,selection_july@Full,selection_aug@Full,selection_sept@Full)
+list_selections<-lapply(list_selections,as.data.frame)
+list_selections<-lapply(list_selections,function(x){select(x,c(1,18:20))})
+list_selections[[1]]$month<-rep(1,6)
+list_selections[[2]]$month<-rep(2,6)
+list_selections[[3]]$month<-rep(3,6)
+list_selections[[4]]$month<-rep(4,6)
+list_selections[[5]]$month<-rep(5,6)
+list_selections<-rbind(list_selections[[1]],list_selections[[2]],list_selections[[3]],list_selections[[4]],list_selections[[5]])
+write.csv(list_selections,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/model_selection_detectionfunction.csv"))
+list_selections[which(list_selections$delta<2),]
+rm(list=setdiff(ls(),c("umf_may","umf_june","umf_july","umf_aug","umf_sept")))
+```
+
+#### **Covariates selection**
+
+```{r density selection of covariates for phi}
+# May
+time.model<-gdistsamp(~1,~time,~1,umf_may,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+temp.model<-gdistsamp(~1,~temp,~1,umf_may,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+timetemp.model<-gdistsamp(~1,~time+temp,~1,umf_may,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+selection_may<-fitList(time.model=time.model,temp.model=temp.model,timetemp.model=timetemp.model)
+selection_may<-modSel(selection_may)
+# June
+time.model<-gdistsamp(~1,~time,~1,umf_june,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+temp.model<-gdistsamp(~1,~temp,~1,umf_june,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+timetemp.model<-gdistsamp(~1,~time+temp,~1,umf_june,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+selection_june<-fitList(time.model=time.model,temp.model=temp.model,timetemp.model=timetemp.model)
+selection_june<-modSel(selection_june)
+# July
+time.model<-gdistsamp(~1,~time,~1,umf_july,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+temp.model<-gdistsamp(~1,~temp,~1,umf_july,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+timetemp.model<-gdistsamp(~1,~time+temp,~1,umf_july,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+selection_july<-fitList(time.model=time.model,temp.model=temp.model,timetemp.model=timetemp.model)
+selection_july<-modSel(selection_july)
+# August
+time.model<-gdistsamp(~1,~time,~1,umf_aug,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+temp.model<-gdistsamp(~1,~temp,~1,umf_aug,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+timetemp.model<-gdistsamp(~1,~time+temp,~1,umf_aug,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+selection_aug<-fitList(time.model=time.model,temp.model=temp.model,timetemp.model=timetemp.model)
+selection_aug<-modSel(selection_aug)
+# september
+time.model<-gdistsamp(~1,~time,~1,umf_sept,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+temp.model<-gdistsamp(~1,~temp,~1,umf_sept,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+timetemp.model<-gdistsamp(~1,~time+temp,~1,umf_sept,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+selection_sept<-fitList(time.model=time.model,temp.model=temp.model,timetemp.model=timetemp.model)
+selection_sept<-modSel(selection_sept)
+```
+
+```{r model selection for the covariates}
+library(dplyr)
+list_selections<-list(selection_may@Full,selection_june@Full,selection_july@Full,selection_aug@Full,selection_sept@Full)
+list_selections<-lapply(list_selections,as.data.frame)
+list_selections<-lapply(list_selections,function(x){select(x,c(1,20:22))})
+list_selections[[1]]$month<-rep(1,3)
+list_selections[[2]]$month<-rep(2,3)
+list_selections[[3]]$month<-rep(3,3)
+list_selections[[4]]$month<-rep(4,3)
+list_selections[[5]]$month<-rep(5,3)
+list_selections<-rbind(list_selections[[1]],list_selections[[2]],list_selections[[3]],list_selections[[4]],list_selections[[5]])
+write.csv(list_selections,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/model_selection_covariates.csv"))
+list_selections[which(list_selections$delta<2),]
+rm(list=setdiff(ls(),c("umf_may","umf_june","umf_july","umf_aug","umf_sept")))
+```
+
+#### **Goodness-of-fit**
+
+```{r final model for distance sampling}
+# Final models
+timetemp.model.may<-gdistsamp(~1, ~time+temp,~1,umf_may,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+timetemp.model.june<-gdistsamp(~1, ~time+temp,~1,umf_june,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+timetemp.model.july<-gdistsamp(~1, ~time+temp,~1,umf_july,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+timetemp.model.aug<-gdistsamp(~1, ~time+temp,~1,umf_aug,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+timetemp.model.sept<-gdistsamp(~1, ~time+temp,~1,umf_sept,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+# Checking multicollinearity
+unmarked::vif(timetemp.model.may,type="phi")
+unmarked::vif(timetemp.model.june,type="phi")
+unmarked::vif(timetemp.model.july,type="phi")
+unmarked::vif(timetemp.model.aug,type="phi")
+unmarked::vif(timetemp.model.sept,type="phi")
+
+# Modifying models to avoid multicollinearity
+remove(timetemp.model.may,timetemp.model.june,timetemp.model.july,timetemp.model.aug,timetemp.model.sept)
+time.model.may<-gdistsamp(~1, ~time,~1,umf_may,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+time.model.june<-gdistsamp(~1, ~time,~1,umf_june,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+time.model.july<-gdistsamp(~1, ~time,~1,umf_july,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+time.model.aug<-gdistsamp(~1, ~time,~1,umf_aug,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+time.model.sept<-gdistsamp(~1, ~time,~1,umf_sept,keyfun = "halfnorm",output="density",unitsOut = "ha",mixture = "NB",method="BFGS")
+# Checking goodness of fit
+## Function returning three fit-statistics.
+fitstats <- function(fm) {
+    observed <- getY(fm@data)
+    expected <- fitted(fm)
+    resids <- residuals(fm)
+    sse <- sum(resids^2)
+    chisq <- sum((observed - expected)^2 / expected)
+    freeTuke <- sum((sqrt(observed) - sqrt(expected))^2)
+    out <- c(SSE=sse, Chisq=chisq, freemanTukey=freeTuke)
+    return(out)
+}
+gof_may<-parboot(time.model.may,fitstats,nsim=1000,report=1)
+gof_june<-parboot(time.model.june,fitstats,nsim=1000,report=1)
+gof_july<-parboot(time.model.july,fitstats,nsim=1000,report=1)
+gof_aug<-parboot(time.model.aug,fitstats,nsim=1000,report=1)
+gof_sept<-parboot(time.model.sept,fitstats,nsim=1000,report=1)
+# Checking overdispersion
+c.hat_may<-gof_may@t0[2]/mean(gof_may@t.star[2])
+c.hat_june<-gof_june@t0[2]/mean(gof_june@t.star[2])
+c.hat_july<-gof_july@t0[2]/mean(gof_july@t.star[2])
+c.hat_aug<-gof_aug@t0[2]/mean(gof_aug@t.star[2])
+c.hat_sept<-gof_sept@t0[2]/mean(gof_sept@t.star[2])
+
+save.image("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/model.distance_sampling.RData")
+```
+
+```{r retrieving density per site and constructing dataset per visit}
+may.data.mean<-bup(unmarked::ranef(time.model.may),stat="mean")
+may.data.confint<-confint(unmarked::ranef(time.model.may))
+may.data.mode<-bup(unmarked::ranef(time.model.may),stat="mode")
+may.data<-cbind(may.data.mean,may.data.confint,may.data.mode,umf_may@siteCovs)
+may.data<-may.data[,1:8]
+may.data$visit<-rep(1,88)
+may.data$area_trans<-(umf_may@tlength*16)/10000
+colnames(may.data)<-c("b_abundance","lci","uci","b_mode",names(umf_may@siteCovs[,1:4]),"visit","area_trans")
+june.data.mean<-bup(unmarked::ranef(time.model.june),stat="mean")
+june.data.confint<-confint(unmarked::ranef(time.model.june))
+june.data.mode<-bup(unmarked::ranef(time.model.june),stat="mode")
+june.data<-cbind(june.data.mean,june.data.confint,june.data.mode,umf_june@siteCovs)
+june.data<-june.data[,1:8]
+june.data$visit<-rep(2,84)
+june.data$area_trans<-(umf_june@tlength*16)/10000
+colnames(june.data)<-c("b_abundance","lci","uci","b_mode",names(umf_june@siteCovs[,1:4]),"visit","area_trans")
+july.data.mean<-bup(unmarked::ranef(time.model.july),stat="mean")
+july.data.confint<-confint(unmarked::ranef(time.model.july))
+july.data.mode<-bup(unmarked::ranef(time.model.july),stat="mode")
+july.data<-cbind(july.data.mean,july.data.confint,july.data.mode,umf_july@siteCovs)
+july.data<-july.data[,1:8]
+july.data$visit<-rep(3,84)
+july.data$area_trans<-(umf_july@tlength*16)/10000
+colnames(july.data)<-c("b_abundance","lci","uci","b_mode",names(umf_july@siteCovs[,1:4]),"visit","area_trans")
+aug.data.mean<-bup(unmarked::ranef(time.model.aug),stat="mean")
+aug.data.confint<-confint(unmarked::ranef(time.model.aug))
+aug.data.mode<-bup(unmarked::ranef(time.model.aug),stat="mode")
+aug.data<-cbind(aug.data.mean,aug.data.confint,aug.data.mode,umf_aug@siteCovs)
+aug.data<-aug.data[,1:8]
+aug.data$visit<-rep(4,84)
+aug.data$area_trans<-(umf_aug@tlength*16)/10000
+colnames(aug.data)<-c("b_abundance","lci","uci","b_mode",names(umf_aug@siteCovs[,1:4]),"visit","area_trans")
+sept.data.mean<-bup(unmarked::ranef(time.model.sept),stat="mean")
+sept.data.confint<-confint(unmarked::ranef(time.model.sept))
+sept.data.mode<-bup(unmarked::ranef(time.model.sept),stat="mode")
+sept.data<-cbind(sept.data.mean,sept.data.confint,sept.data.mode,umf_sept@siteCovs)
+sept.data<-sept.data[,1:8]
+sept.data$visit<-rep(5,84)
+sept.data$area_trans<-(umf_sept@tlength*16)/10000
+colnames(sept.data)<-c("b_abundance","lci","uci","b_mode",names(umf_sept@siteCovs[,1:4]),"visit","area_trans")
+lizards_data<-rbind(may.data,june.data,july.data,aug.data,sept.data)
+write.csv(lizards_data,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/lizards_data.csv"))
+
+save.image("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/final.model.distance_sampling.RData")
+
+rm(list=setdiff(ls(),c("lizards_data")))
+```
+
+### **Analyzing the impact of snakes**
+
+```{r analyzing the impact of snakes}
+library(glmmTMB)
+library(car)
+library(effsize)
+lizards_data<-read.csv("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/lizards_data.csv",header=T,row.names = 1)
+lizards_data$snakes<-as.factor(lizards_data$snakes)
+lizards_data$transect<-as.factor(lizards_data$transect)
+lizards_data$area<-as.factor(lizards_data$area)
+lizards_data$visit<-as.factor(lizards_data$visit)
+hist(lizards_data$b_abundance)
+lizards_data$liz_abundance<-lizards_data$b_abundance
+lizards_data$liz_abundance[which(lizards_data$lci==0)]<-0
+lizards_data$liz_density<-lizards_data$liz_abundance/lizards_data$area_trans
+write.csv(lizards_data,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/lizards_data.csv"))
+
+# Modeling the impact of invasive snakes
+library(DHARMa)
+model.lizards<-glmmTMB(liz_density~snakes+(1|area)+(1|visit)+(1|transect),data=lizards_data,family=gaussian,ziformula=~snakes,dispformula = ~area+visit)
+plot(simulateResiduals(model.lizards,n=1000,plot=T))
+testResiduals(simulateResiduals(model.lizards,n=1000,plot=T))
+summary(model.lizards)
+Anova(model.lizards,component="cond")
+Anova(model.lizards,component="zi")
+
+# Effect size
+site_averageabundance<-tapply(lizards_data$liz_density,lizards_data[,5],mean)
+snakes<-ifelse(as.integer(substr(rownames(site_averageabundance),1,1))%%2==0,2,1)
+averaged_data<-as.data.frame(cbind(snakes,site_averageabundance))
+colnames(averaged_data)<-c("snakes","averaged_density")
+effsize_ds<-cohen.d(averaged_density~snakes,data=averaged_data,pooled=F,hedges.correction=F)
+effsize_ds
+
+# Calculating means
+## Overall data
+tapply(lizards_data$liz_density,lizards_data$snakes,mean)
+tapply(lizards_data$liz_density,lizards_data$snakes,sd)
+### Removing sites with no detections 
+tapply(lizards_data[which(lizards_data$liz_density>0),]$liz_density,lizards_data[which(lizards_data$liz_density>0),]$snakes,mean)
+tapply(lizards_data[which(lizards_data$liz_density>0),]$liz_density,lizards_data[which(lizards_data$liz_density>0),]$snakes,sd)
+### Counting sites with no detections
+matrix_nodetections<-table(averaged_data$snakes,averaged_data$averaged_density>0)
+(matrix_nodetections[,2]/102)*100
+
+## Per area
+area_data<-split(lizards_data,lizards_data$area)
+mean_area<-lapply(area_data,function(x) aggregate(x$liz_density,list(x$snakes),mean))
+sd_area<-lapply(area_data,function(x) aggregate(x$liz_density,list(x$snakes),sd))
+mean_area<-lapply(mean_area,"[[","x")
+mean_area<-as.matrix(unlist(mean_area))
+sd_area<-lapply(sd_area,"[[","x")
+sd_area<-as.matrix(unlist(sd_area))
+area_data<-cbind(c(1,1,2,2,3,3),c(1,2,1,2,1,2),mean_area,sd_area)
+colnames(area_data)<-c("area","snakes","mean","sd")
+area_data
+
+write.csv(area_data,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/area_data.csv"))
+
+save.image("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/distance_sampling/results.distance_samplingy.RData") # saving progress
+
+rm(list=ls())
+```
+
+
+# **Analysis geckos & skinks**
+
+```{r data formatting}
+# Importing data
+library(readxl)
+tarentola_chalcides <- read_excel("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Data/Skinks & geckos/data_skinks&geckos2019.xlsx", sheet = "data")
+# Remove unnecessary columns
+tarentola_chalcides<-tarentola_chalcides[,-c(9,14,28)]
+# Converting factors
+names<-names(tarentola_chalcides)
+list<-tarentola_chalcides[,c(1:3,6:8,24)]
+list<-sapply(list, as.factor)
+tarentola_chalcides<-cbind(tarentola_chalcides,list)
+tarentola_chalcides<-tarentola_chalcides[,-c(1:3,6:8,24)]
+tarentola_chalcides<-tarentola_chalcides[names]
+remove(names,list)
+# Removing discarded sites
+tarentola_chalcides<-tarentola_chalcides[tarentola_chalcides$discarded==2,]
+# Removing control sites
+data<-tarentola_chalcides[tarentola_chalcides$control==2,]
+```
+
+## **Geckos**
+
+### **Covariate analysis geckos**
+
+```{r covariate analysis geckos}
+library(readxl)
+library(lme4)
+library(DHARMa)
+library(MuMIn)
+# Generating Negative binomial GLMM to detect the most important variables
+model<-glmer.nb(geckos~scale(julian_date)+scale(time_decimal)+scale(temp)+scale(hr)+scale(wind_max)+scale(wind_avg)+scale(rocks)+scale(n_obs)+(1|site),data=data)
+testResiduals(simulateResiduals(model,n=1000))
+testZeroInflation(simulateResiduals(model,n=1000))
+summary(model)
+# Extracting results
+model_results<-summary(model)
+model_results<-model_results$coefficients
+estimate<-model_results[,1]
+se<-model_results[,2]
+p<-model_results[,4]
+model_results<-c(estimate,se,p)
+model_results<-cbind(model_results,c(rep("estimate",9),rep("se",9),rep("p",9)),rep(seq(1,9,1),3))
+colnames(model_results)<-c("results","type","number")
+model_results<-as.data.frame(model_results)
+model_results<-model_results[order(model_results$number),]
+model_results<-as.matrix(model_results)
+model_results
+write.csv(model_results,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/abiotic_variables_influence_geckos.csv"),row.names = T)
+
+rm(list=setdiff(ls(),c("data","tarentola_chalcides")))
+```
+
+### **Analysis of snakes impacts on geckos**
+
+#### **Residuals calculation**
+
+We use the predictors that correlated significantly with geckos. We use a linear regression to calculate the residuals.
+
+```{r residuals calculation geckos}
+library(lme4)
+library(VGAM)
+geckos_res<-lm(yeo.johnson(geckos,lambda=0.002)~scale(time_decimal)+scale(temp)+scale(rocks),data=data)
+car::vif(geckos_res)
+data$geckos_res<-residuals(geckos_res)
+```
+
+```{r model for geckos}
+library(glmmTMB)
+library(DHARMa)
+library(effsize)
+hist(data$geckos_res)
+model.geckos<-glmmTMB(geckos_res~snakes+(1|area)+(1|visit)+(1|site),family=gaussian,data=data,dispformula=~area+visit)
+plot(simulateResiduals(model.geckos,n=1000,plot=T))
+testResiduals(simulateResiduals(model.geckos,n=1000,plot=T))
+summary(model.geckos)
+car::Anova(model.geckos,component="cond")
+
+# Model effects sizes
+site_averageabundance<-tapply(data$geckos_res,data[,3],mean)
+snakes<-ifelse(as.integer(substr(rownames(site_averageabundance),1,1))%%2==0,2,1)
+averaged_data<-as.data.frame(cbind(snakes,site_averageabundance))
+colnames(averaged_data)<-c("snakes","averaged_density")
+effsize_geckos<-cohen.d(averaged_density~snakes,data=averaged_data,pooled=F,hedges.correction=F)
+effsize_geckos
+
+# Calculating means
+## Overall
+tapply(data$geckos_res,data$snakes,mean)
+tapply(data$geckos_res,data$snakes,sd)
+## Per area
+area_data<-split(data,data$area)
+mean_area<-lapply(area_data,function(x) aggregate(x$geckos_res,list(x$snakes),mean))
+sd_area<-lapply(area_data,function(x) aggregate(x$geckos_res,list(x$snakes),sd))
+mean_area<-lapply(mean_area,"[[","x")
+mean_area<-as.matrix(unlist(mean_area))
+sd_area<-lapply(sd_area,"[[","x")
+sd_area<-as.matrix(unlist(sd_area))
+area_data<-cbind(c(1,1,2,2,3,3),c(1,2,1,2,1,2),mean_area,sd_area)
+colnames(area_data)<-c("area","snakes","mean","sd")
+area_data
+
+write.csv(area_data,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/skinks&geckos/area_data_geckos.csv"))
+
+save.image("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/skinks&geckos/results_geckos.RData") # saving progress
+```
+
+## **Skinks**
+
+### **Covariate analysis skinks**
+
+```{r covariate analysis skinks}
+library(readxl)
+library(lme4)
+library(DHARMa)
+library(MuMIn)
+# Generating Negative binomial GLMM to detect the most important variables
+model<-glmer.nb(skinks~scale(julian_date)+scale(time_decimal)+scale(temp)+scale(hr)+scale(wind_max)+scale(wind_avg)+scale(rocks)+scale(n_obs)+scale(n_obs)+(1|site),data=data)
+testResiduals(simulateResiduals(model,n=1000))
+testZeroInflation(simulateResiduals(model,n=1000))
+summary(model)
+# Extracting results
+model_results<-summary(model)
+model_results<-model_results$coefficients
+estimate<-model_results[,1]
+se<-model_results[,2]
+p<-model_results[,4]
+model_results<-c(estimate,se,p)
+model_results<-cbind(model_results,c(rep("estimate",9),rep("se",9),rep("p",9)),rep(seq(1,9,1),3))
+colnames(model_results)<-c("results","type","number")
+model_results<-as.data.frame(model_results)
+model_results<-model_results[order(model_results$number),]
+model_results<-as.matrix(model_results)
+model_results
+write.csv(model_results,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/abiotic_variables_influence_skinks.csv"))
+rm(list=setdiff(ls(),c("data","tarentola_chalcides")))
+```
+
+### **Analysis of snakes impacts on skinks**
+
+#### **Residuals calculation**
+
+We use the predictors that correlated significantly with skinks. We use a linear regression (dependent variable skinks transformed) to calculate the residuals.
+
+```{r residuals calculation skinks}
+library(VGAM)
+skinks_res<-lm(yeo.johnson(skinks,lambda=0.002)~scale(temp)+scale(n_obs),data=data)
+car::vif(skinks_res)
+data$skinks_res<-skinks_res$residuals
+```
+
+```{r model for skinks}
+library(glmmTMB)
+library(DHARMa)
+library(effsize)
+hist(data$skinks_res)
+model.skinks<-glmmTMB(skinks_res~snakes+(1|area)+(1|visit)+(1|site),family=gaussian,data=data,dispformula=~area+visit)
+plot(simulateResiduals(model.skinks,n=1000,plot=T))
+testResiduals(simulateResiduals(model.skinks,n=1000,plot=T))
+summary(model.skinks)
+car::Anova(model.skinks,component="cond")
+
+# Model effects sizes
+site_averageabundance<-tapply(data$skinks_res,data[,3],mean)
+snakes<-ifelse(as.integer(substr(rownames(site_averageabundance),1,1))%%2==0,2,1)
+averaged_data<-as.data.frame(cbind(snakes,site_averageabundance))
+colnames(averaged_data)<-c("snakes","averaged_density")
+effsize_skinks<-cohen.d(averaged_density~snakes,data=averaged_data,pooled=F,hedges.correction=F)
+effsize_skinks
+
+# Calculating means
+## Overall
+tapply(data$skinks_res,data$snakes,mean)
+tapply(data$skinks_res,data$snakes,sd)
+## Per area
+area_data<-split(data,data$area)
+mean_area<-lapply(area_data,function(x) aggregate(x$skinks_res,list(x$snakes),mean))
+sd_area<-lapply(area_data,function(x) aggregate(x$skinks_res,list(x$snakes),sd))
+mean_area<-lapply(mean_area,"[[","x")
+mean_area<-as.matrix(unlist(mean_area))
+sd_area<-lapply(sd_area,"[[","x")
+sd_area<-as.matrix(unlist(sd_area))
+area_data<-cbind(c(1,1,2,2,3,3),c(1,2,1,2,1,2),mean_area,sd_area)
+colnames(area_data)<-c("area","snakes","mean","sd")
+area_data
+
+write.csv(area_data,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/skinks&geckos/area_data_skinks.csv"))
+
+write.csv(data,file=file.path("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/skinks&geckos/tarentola_chalcides_data.csv"))
+
+save.image("C:/Users/Julien/Desktop/Endemic squamates abundance/Research/Analysis/skinks&geckos/results_skinks.RData") # saving progress
+```
+
+
+
+
+
+
